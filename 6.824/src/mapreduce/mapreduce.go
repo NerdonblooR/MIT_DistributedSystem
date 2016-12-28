@@ -12,7 +12,6 @@ import "net"
 import "bufio"
 import "hash/fnv"
 
-
 // import "os/exec"
 
 // A simple mapreduce library with a sequential implementation.
