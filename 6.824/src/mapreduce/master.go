@@ -28,54 +28,80 @@ func (mr *MapReduce) KillWorkers() *list.List {
 	return l
 }
 
+
+func (mr *MapReduce) GetWorker() *WorkerInfo {
+	var w *WorkerInfo
+	select {
+		case address:= <-mr.registerChannel:
+			//use some mechanism to protect map
+			mr.Workers[address] = &WorkerInfo{address}
+			w = mr.Workers[address]
+		case address:= <-mr.availableWorkerChannel:
+			w = mr.Workers[address]
+	}
+	return w
+}
+
+func (mr *MapReduce) AssignJob(w *WorkerInfo, jobNum int, jt JobType) {
+	//rpc call to invoke DoJob
+	numOther := 0
+	switch jt {
+		case Map:
+			numOther = mr.nReduce
+		case Reduce:	
+			numOther = mr.nMap
+	}
+	args := &DoJobArgs{mr.file, jt, jobNum, numOther}
+	var reply DoJobReply
+	ok := call(w.address, "Worker.DoJob", args, &reply)
+	if ok == false {
+		fmt.Printf("DoWork: RPC %s %s error\n", w.address, jt)
+		mr.failedJobChannel <- jobNum
+	}else{
+		mr.jobDoneChannel <- jobNum
+		mr.availableWorkerChannel <- w.address
+	}
+}
+
 func (mr *MapReduce) RunMaster() *list.List {
 	// Your code here
-	availableWorkerChannel := make(chan string)
 	var w *WorkerInfo
 	//Map phase
+	//add a chanel to capture failure information
+	//loop an arry of unfinished jobs, when reading from failed, add to unfinished job array
+	nJobDone := 0
 	for mapJob :=0; mapJob < mr.nMap; mapJob++{
-		select {
-			case address:= <-mr.registerChannel:
-				//use some mechanism to protect map
-				mr.Workers[address] = &WorkerInfo{address}
-				w = mr.Workers[address]
-			case address:= <-availableWorkerChannel:
-				w = mr.Workers[address]
-		}
+		w = mr.GetWorker()
+		go mr.AssignJob(w, mapJob, Map)
+	}
 
-		go func (w *WorkerInfo,jobNum int){
-			//rpc call to invoke DoJob
-			args := &DoJobArgs{mr.file, Map, jobNum, mr.nReduce}
-			var reply DoJobReply
-			ok := call(w.address, "Worker.DoJob", args, &reply)
-			if ok == false {
-				fmt.Printf("DoWork: RPC %s map error\n", w.address)
-			}
-			availableWorkerChannel <- w.address
-		}(w,mapJob)
+	for nJobDone < mr.nMap {
+		fmt.Printf("HERE： %d\n", nJobDone)
+		select {
+			case <-mr.jobDoneChannel:
+				nJobDone++ //just update the number of finished jobs
+			case mapJob := <- mr.failedJobChannel:
+				w = mr.GetWorker()
+				go mr.AssignJob(w, mapJob, Map)
+		}
 	}
 
 	//Reduce phase
+	nJobDone = 0
 	for rdcJob :=0; rdcJob < mr.nReduce; rdcJob++{
-		select {
-			case address:= <-mr.registerChannel:
-				//use some mechanism to protect map
-				mr.Workers[address] = &WorkerInfo{address}
-				w = mr.Workers[address]
-			case address:= <-availableWorkerChannel:
-				w = mr.Workers[address]
-		}
+		w = mr.GetWorker()
+		go mr.AssignJob(w, rdcJob, Reduce)
+	}
 
-		go func (w *WorkerInfo,jobNum int){
-			//rpc call to invoke DoJob
-			args := &DoJobArgs{mr.file, Reduce, jobNum, mr.nMap}
-			var reply DoJobReply
-			ok := call(w.address, "Worker.DoJob", args, &reply)
-			if ok == false {
-				fmt.Printf("DoWork: RPC %s reduce error\n", w.address)
-			}
-			availableWorkerChannel <- w.address
-		}(w,rdcJob)
+
+	for nJobDone < mr.nReduce{
+		select {
+			case <-mr.jobDoneChannel:
+				nJobDone++ //just update the number of finished jobs
+			case rdcJob := <- mr.failedJobChannel:
+				w = mr.GetWorker()
+				go mr.AssignJob(w, rdcJob, Reduce)
+		}
 	}
 
 	return mr.KillWorkers()
